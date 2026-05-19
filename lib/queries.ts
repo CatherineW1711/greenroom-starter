@@ -146,7 +146,7 @@ export async function getReports() {
   }
 
   const totalDeals = pastDeals.length;
-  const supportedTypes = ["flat", "percentage_of_gross"];
+  const supportedTypes = ["flat", "percentage_of_gross", "vs"];
   const supportedCount = pastDeals.filter((d) =>
     supportedTypes.includes(d.dealType),
   ).length;

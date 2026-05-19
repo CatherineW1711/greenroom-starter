@@ -64,12 +64,12 @@ export async function parseDealTerms(
         schema: {
           type: "object",
           properties: {
-            guarantee: { type: ["number", "null"] },
-            percentage: { type: ["number", "null"] },
-            percentageDecimal: { type: ["number", "null"] },
+            guarantee: { anyOf: [{ type: "number" }, { type: "null" }] },
+            percentage: { anyOf: [{ type: "number" }, { type: "null" }] },
+            percentageDecimal: { anyOf: [{ type: "number" }, { type: "null" }] },
             basis: { anyOf: [{ type: "string", enum: ["net", "gross"] }, { type: "null" }] },
-            expense_cap: { type: ["number", "null"] },
-            hospitality_cap: { type: ["number", "null"] },
+            expense_cap: { anyOf: [{ type: "number" }, { type: "null" }] },
+            hospitality_cap: { anyOf: [{ type: "number" }, { type: "null" }] },
             ambiguity_flags: { type: "array", items: { type: "string" } },
           },
           required: [
