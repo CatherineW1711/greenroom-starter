@@ -3,32 +3,32 @@
  *
  * IMPORTANT — DELIBERATELY INCOMPLETE.
  *
- * This is the existing Greenroom settlement engine. It was built early in
- * the company's life, when most deals were flat guarantees. It currently
- * handles two deal types end-to-end:
+ * Supported deal types:
  *
  *   1. flat                 — $X guaranteed, optional sellout bonus
  *   2. percentage_of_gross  — X% of gross, no expense deductions, optional sellout bonus
+ *   3. vs                   — guarantee vs % of net after expenses, whichever greater;
+ *                             supports expense cap and hospitality sub-cap
  *
- * For both, it reads `bonusesJson` and applies bonuses where it can — but
- * only the structured ones. Bonuses that exist only in `dealNotesFreetext`
- * are invisible to this engine.
+ * For supported deal types, bonuses in `bonusesJson` are evaluated and applied.
+ * Bonuses that exist only in `dealNotesFreetext` are invisible to this engine
+ * until the AI parsing layer extracts them into structured form.
  *
- * It does NOT handle:
+ * Still NOT handled (returns { supported: false }):
  *
- *   - vs deals (guarantee vs % of net, whichever greater)
- *   - percentage_of_net deals (with expense deductions)
+ *   - percentage_of_net deals (no guarantee floor — structurally similar to vs)
  *   - door deals
- *   - recoups (those flow separately through the settlement record)
- *   - tier ratchets (would need vs-deal support first)
+ *   - recoups (flow separately through the settlement record)
+ *   - tier ratchets (reported in bonusesNotTriggered with explanation)
  *   - comps that count toward gross
- *
- * For unsupported deals, the tool returns { supported: false } and the UI
- * shows the "this deal type isn't yet supported" empty state. About 82% of
- * Greenroom's customers default to spreadsheets because of this.
  */
 
 import type { Deal, Expense, TicketSale, Bonus } from "@/db/schema";
+
+/** Minimal money formatter for note strings — keeps dealMath free of UI imports. */
+function usd(n: number) {
+  return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 2 }).format(n);
+}
 
 export type SettlementCalculation =
   | {
@@ -44,6 +44,10 @@ export type SettlementCalculation =
       bonusesApplied: { label: string; amount: number; reason: string }[];
       // Bonuses that exist on the deal but didn't trigger (helpful context).
       bonusesNotTriggered: { label: string; amount: number; reason: string }[];
+      // vs deal only — undefined for flat and percentage_of_gross
+      hitBackend?: boolean;
+      guaranteeAmount?: number;
+      percentagePayout?: number;
     }
   | {
       supported: false;
@@ -165,6 +169,166 @@ export function calculateSettlement(input: CalcInput): SettlementCalculation {
         : `gross × ${deal.percentage} = ${payout.toFixed(2)}`,
       bonusesApplied: bonusResult.applied,
       bonusesNotTriggered: bonusResult.notTriggered,
+    };
+  }
+
+  // ---------- vs deal (guarantee vs % of net after expenses) ----------
+  if (deal.dealType === "vs") {
+    if (deal.guaranteeAmount == null) {
+      return { supported: false, reason: "Vs deal is missing a guarantee amount.", dealType: deal.dealType };
+    }
+    if (deal.percentage == null) {
+      return { supported: false, reason: "Vs deal is missing a percentage.", dealType: deal.dealType };
+    }
+    const pct = deal.percentage; // stored as decimal, e.g. 0.80
+    const guarantee = deal.guaranteeAmount;
+    const pctLabel = `${(pct * 100).toFixed(0)}%`;
+
+    const bonusResult = applyBonuses(parseBonuses(deal), {
+      gross: grossBoxOffice,
+      tickets,
+      capacity: venueCapacity,
+    });
+
+    // ---------- vs/gross: no expense deductions ----------
+    if (deal.percentageBasis === "gross") {
+      const percentagePayout = grossBoxOffice * pct;
+      const hitBackend = percentagePayout > guarantee;
+      const basePayout = hitBackend ? percentagePayout : guarantee;
+
+      const steps: { label: string; value: number; note?: string }[] = [
+        { label: "Gross box office", value: grossBoxOffice },
+        {
+          label: `× ${pctLabel} = percentage payout`,
+          value: percentagePayout,
+          note: "Gross deal — no expense deductions",
+        },
+        {
+          label: hitBackend ? `Guarantee (${usd(guarantee)}) — backend wins` : `Guarantee — guarantee wins`,
+          value: hitBackend ? percentagePayout : guarantee,
+          note: hitBackend
+            ? `${usd(percentagePayout)} > ${usd(guarantee)} — artist gets the percentage`
+            : `${usd(percentagePayout)} ≤ ${usd(guarantee)} — artist gets the guarantee`,
+        },
+        ...bonusResult.applied.map((b) => ({ label: b.label, value: b.amount, note: b.reason })),
+      ];
+
+      const backendStr = hitBackend
+        ? `backend ${usd(percentagePayout)} > guarantee ${usd(guarantee)} → ${pctLabel} of gross`
+        : `guarantee ${usd(guarantee)} > backend ${usd(percentagePayout)} → flat guarantee`;
+
+      return {
+        supported: true,
+        grossBoxOffice,
+        netBoxOffice,
+        totalExpenses,
+        totalToArtist: basePayout + bonusResult.totalApplied,
+        steps,
+        finalFormula: bonusResult.applied.length
+          ? `${backendStr} + bonuses ${usd(bonusResult.totalApplied)} = ${usd(basePayout + bonusResult.totalApplied)}`
+          : backendStr,
+        bonusesApplied: bonusResult.applied,
+        bonusesNotTriggered: bonusResult.notTriggered,
+        hitBackend,
+        guaranteeAmount: guarantee,
+        percentagePayout,
+      };
+    }
+
+    // ---------- vs/net: guarantee vs % of net after expenses ----------
+    // Apply hospitality sub-cap before summing total expenses.
+    const hospitalityCap = deal.hospitalityCap ?? Infinity;
+    let hospitalityTotal = 0;
+    let otherExpensesTotal = 0;
+    for (const e of expenses) {
+      if (e.absorbedByVenue) continue;
+      if (e.category === "hospitality") {
+        hospitalityTotal += e.amount;
+      } else {
+        otherExpensesTotal += e.amount;
+      }
+    }
+    const cappedHospitality = Math.min(hospitalityTotal, hospitalityCap);
+    const summedExpenses = cappedHospitality + otherExpensesTotal;
+
+    // Apply overall expense cap.
+    const expenseCap = deal.expenseCap ?? Infinity;
+    const effectiveExpenses = Math.min(summedExpenses, expenseCap);
+
+    // Net after fees and expenses; floor at 0 for percentage calculation.
+    const netAfterExpenses = netBoxOffice - effectiveExpenses;
+    const percentagePayout = Math.max(0, netAfterExpenses) * pct;
+
+    const hitBackend = percentagePayout > guarantee;
+    const basePayout = hitBackend ? percentagePayout : guarantee;
+
+    const steps: { label: string; value: number; note?: string }[] = [
+      { label: "Gross box office", value: grossBoxOffice },
+      { label: "Less: ticket fees", value: -totalFees },
+      { label: "= Net box office", value: netBoxOffice },
+    ];
+
+    if (hospitalityTotal > 0 && deal.hospitalityCap != null && hospitalityTotal > hospitalityCap) {
+      steps.push({
+        label: `Hospitality expenses (capped at ${usd(hospitalityCap)})`,
+        value: -cappedHospitality,
+        note: `Raw total was ${usd(hospitalityTotal)}; cap of ${usd(hospitalityCap)} applied`,
+      });
+    } else if (cappedHospitality > 0) {
+      steps.push({ label: "Hospitality expenses", value: -cappedHospitality });
+    }
+
+    if (otherExpensesTotal > 0) {
+      steps.push({ label: "Other passed-through expenses", value: -otherExpensesTotal });
+    }
+
+    if (deal.expenseCap != null && summedExpenses > expenseCap) {
+      steps.push({
+        label: `Expense cap applied`,
+        value: effectiveExpenses - summedExpenses, // negative adjustment
+        note: `Raw expenses ${usd(summedExpenses)} reduced to cap of ${usd(expenseCap)}`,
+      });
+    }
+
+    steps.push({ label: "= Net after expenses", value: netAfterExpenses });
+    steps.push({
+      label: `× ${pctLabel} = percentage payout`,
+      value: percentagePayout,
+      note: netAfterExpenses < 0
+        ? "Net was negative; percentage floored at $0"
+        : undefined,
+    });
+    steps.push({
+      label: hitBackend ? `Guarantee (${usd(guarantee)}) — backend wins` : `Guarantee — guarantee wins`,
+      value: hitBackend ? percentagePayout : guarantee,
+      note: hitBackend
+        ? `${usd(percentagePayout)} > ${usd(guarantee)} — artist gets the percentage`
+        : `${usd(percentagePayout)} ≤ ${usd(guarantee)} — artist gets the guarantee`,
+    });
+
+    for (const b of bonusResult.applied) {
+      steps.push({ label: b.label, value: b.amount, note: b.reason });
+    }
+
+    const backendStr = hitBackend
+      ? `backend ${usd(percentagePayout)} > guarantee ${usd(guarantee)} → ${pctLabel} of net`
+      : `guarantee ${usd(guarantee)} > backend ${usd(percentagePayout)} → flat guarantee`;
+
+    return {
+      supported: true,
+      grossBoxOffice,
+      netBoxOffice,
+      totalExpenses: effectiveExpenses,
+      totalToArtist: basePayout + bonusResult.totalApplied,
+      steps,
+      finalFormula: bonusResult.applied.length
+        ? `${backendStr} + bonuses ${usd(bonusResult.totalApplied)} = ${usd(basePayout + bonusResult.totalApplied)}`
+        : backendStr,
+      bonusesApplied: bonusResult.applied,
+      bonusesNotTriggered: bonusResult.notTriggered,
+      hitBackend,
+      guaranteeAmount: guarantee,
+      percentagePayout,
     };
   }
 

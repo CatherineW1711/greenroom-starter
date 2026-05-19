@@ -6,6 +6,7 @@ import {
   AlertCircle,
   Clock,
   TrendingUp,
+  ShieldAlert,
 } from "lucide-react";
 import { getShowById } from "@/lib/queries";
 import {
@@ -76,6 +77,11 @@ export default async function ShowDetailPage({
   const bonuses = deal ? parseBonuses(deal) : [];
 
   const isDisputed = settlement?.status === "disputed";
+
+  const EARLY_SETTLEMENT_STATUSES = new Set(["draft", "submitted", "in_review"]);
+  const showRiskCard =
+    deal?.dealType === "vs" &&
+    (settlement == null || EARLY_SETTLEMENT_STATUSES.has(settlement.status ?? ""));
 
   return (
     <div className="max-w-7xl">
@@ -401,6 +407,13 @@ export default async function ShowDetailPage({
             </CardContent>
           </Card>
 
+          {/* Expense risk — vs deals only, pre-settlement */}
+          {showRiskCard && (
+            <div className="md:col-span-3">
+              <ExpenseRiskCard deal={deal} expenses={expenses} />
+            </div>
+          )}
+
           {/* Expenses */}
           <Card className="md:col-span-3">
             <CardHeader>
@@ -474,6 +487,132 @@ function MiniStat({
         {value}
       </div>
     </div>
+  );
+}
+
+type CapStatus = "over" | "near" | "ok" | "no_cap";
+
+interface CapCheck {
+  label: string;
+  current: number;
+  cap: number | null | undefined;
+  status: CapStatus;
+  pct: number | null;
+}
+
+function checkCap(label: string, current: number, cap: number | null | undefined): CapCheck {
+  if (cap == null) return { label, current, cap, status: "no_cap", pct: null };
+  const pct = cap > 0 ? current / cap : current > 0 ? Infinity : 0;
+  const status = pct >= 1 ? "over" : pct >= 0.8 ? "near" : "ok";
+  return { label, current, cap, status, pct };
+}
+
+function CapRow({ check }: { check: CapCheck }) {
+  const isOver = check.status === "over";
+  const isNear = check.status === "near";
+  const isNoCap = check.status === "no_cap";
+
+  const barPct = check.pct != null ? Math.min(check.pct * 100, 100) : 0;
+  const barColor = isOver ? "bg-rose-500" : isNear ? "bg-amber-400" : "bg-ink-200";
+  const textColor = isOver ? "text-rose-700" : isNear ? "text-amber-700" : "text-ink-400";
+
+  return (
+    <div className="py-3 first:pt-0 last:pb-0">
+      <div className="flex items-baseline justify-between gap-4 mb-1.5">
+        <span className="text-[13px] text-ink-700">{check.label}</span>
+        {isNoCap ? (
+          <span className="text-[11.5px] text-ink-400">No cap set</span>
+        ) : (
+          <span className={`text-[12px] font-mono tabular font-medium ${textColor}`}>
+            {formatMoney(check.current)}
+            <span className="text-ink-300 font-normal"> / {formatMoney(check.cap!)}</span>
+            <span className={`ml-1.5 text-[11px] ${textColor}`}>
+              ({Math.round((check.pct ?? 0) * 100)}%)
+            </span>
+          </span>
+        )}
+      </div>
+      {!isNoCap && (
+        <div className="h-1.5 rounded-full bg-ink-100 overflow-hidden">
+          <div
+            className={`h-full rounded-full transition-all ${barColor}`}
+            style={{ width: `${barPct}%` }}
+          />
+        </div>
+      )}
+      {isNoCap && (
+        <div className="text-[11.5px] text-ink-400 leading-snug">
+          {formatMoney(check.current)} spent — no contractual limit in the deal terms.
+        </div>
+      )}
+    </div>
+  );
+}
+
+type ShowData = NonNullable<Awaited<ReturnType<typeof getShowById>>>;
+
+function ExpenseRiskCard({
+  deal,
+  expenses,
+}: {
+  deal: ShowData["deal"];
+  expenses: ShowData["expenses"];
+}) {
+  if (!deal) return null;
+
+  const passed = expenses.filter((e) => !e.absorbedByVenue);
+  const totalExpenses = passed.reduce((s, e) => s + e.amount, 0);
+  const hospitalityExpenses = passed
+    .filter((e) => e.category === "hospitality")
+    .reduce((s, e) => s + e.amount, 0);
+
+  const checks: CapCheck[] = [
+    checkCap("Total expenses", totalExpenses, deal.expenseCap),
+    checkCap("Hospitality", hospitalityExpenses, deal.hospitalityCap),
+  ];
+
+  const worstStatus = checks.reduce<CapStatus>((worst, c) => {
+    const rank: Record<CapStatus, number> = { over: 3, near: 2, no_cap: 1, ok: 0 };
+    return rank[c.status] > rank[worst] ? c.status : worst;
+  }, "ok");
+
+  const headerColor =
+    worstStatus === "over"
+      ? "text-rose-700"
+      : worstStatus === "near"
+        ? "text-amber-700"
+        : "text-ink-500";
+
+  const borderColor =
+    worstStatus === "over"
+      ? "border-rose-200/60"
+      : worstStatus === "near"
+        ? "border-amber-200/60"
+        : "border-ink-200/60";
+
+  return (
+    <Card className={`border ${borderColor}`}>
+      <CardHeader>
+        <div className="flex items-center gap-2">
+          <ShieldAlert className={`h-4 w-4 ${headerColor}`} />
+          <CardTitle className={headerColor}>Expense risk</CardTitle>
+        </div>
+        <CardDescription>
+          {worstStatus === "over"
+            ? "One or more expense caps are exceeded."
+            : worstStatus === "near"
+              ? "Approaching cap — worth flagging before show night."
+              : worstStatus === "no_cap"
+                ? "No caps set — all spend is unconstrained."
+                : "Expenses within cap limits."}
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="divide-y divide-ink-100/60">
+        {checks.map((c) => (
+          <CapRow key={c.label} check={c} />
+        ))}
+      </CardContent>
+    </Card>
   );
 }
 
