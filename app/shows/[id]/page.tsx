@@ -8,7 +8,7 @@ import {
   TrendingUp,
   ShieldAlert,
 } from "lucide-react";
-import { getShowById } from "@/lib/queries";
+import { getShowById, getAgentDisputeCount } from "@/lib/queries";
 import {
   Card,
   CardContent,
@@ -20,6 +20,7 @@ import {
 import { StatusBadge, DealTypeBadge, PlainBadge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { parseBonuses } from "@/lib/dealMath";
+import { parseDealTerms } from "@/lib/actions/parseDealTerms";
 import {
   formatMoney,
   formatMoneyCompact,
@@ -80,8 +81,27 @@ export default async function ShowDetailPage({
 
   const EARLY_SETTLEMENT_STATUSES = new Set(["draft", "submitted", "in_review"]);
   const showRiskCard =
-    deal?.dealType === "vs" &&
+    deal != null &&
+    (deal.expenseCap != null || deal.hospitalityCap != null) &&
     (settlement == null || EARLY_SETTLEMENT_STATUSES.has(settlement.status ?? ""));
+
+  let ambiguityFlags: string[] = [];
+  let agentDisputeCount = 0;
+
+  if (showRiskCard) {
+    await Promise.all([
+      deal?.dealNotesFreetext
+        ? parseDealTerms(deal.dealNotesFreetext)
+            .then((p) => { ambiguityFlags = p.ambiguity_flags; })
+            .catch(() => {})
+        : Promise.resolve(),
+      agent?.id
+        ? getAgentDisputeCount(agent.id)
+            .then((n) => { agentDisputeCount = n; })
+            .catch(() => {})
+        : Promise.resolve(),
+    ]);
+  }
 
   return (
     <div className="max-w-7xl">
@@ -410,7 +430,7 @@ export default async function ShowDetailPage({
           {/* Expense risk — vs deals only, pre-settlement */}
           {showRiskCard && (
             <div className="md:col-span-3">
-              <ExpenseRiskCard deal={deal} expenses={expenses} />
+              <ExpenseRiskCard deal={deal} expenses={expenses} ambiguityFlags={ambiguityFlags} agentDisputeCount={agentDisputeCount} agentName={agent?.name ?? null} />
             </div>
           )}
 
@@ -554,9 +574,15 @@ type ShowData = NonNullable<Awaited<ReturnType<typeof getShowById>>>;
 function ExpenseRiskCard({
   deal,
   expenses,
+  ambiguityFlags,
+  agentDisputeCount,
+  agentName,
 }: {
   deal: ShowData["deal"];
   expenses: ShowData["expenses"];
+  ambiguityFlags: string[];
+  agentDisputeCount: number;
+  agentName: string | null;
 }) {
   if (!deal) return null;
 
@@ -576,6 +602,8 @@ function ExpenseRiskCard({
     return rank[c.status] > rank[worst] ? c.status : worst;
   }, "ok");
 
+  const hasContractRisk = ambiguityFlags.length > 0;
+
   const headerColor =
     worstStatus === "over"
       ? "text-rose-700"
@@ -584,8 +612,8 @@ function ExpenseRiskCard({
         : "text-ink-500";
 
   const borderColor =
-    worstStatus === "over"
-      ? "border-rose-200/60"
+    worstStatus === "over" || hasContractRisk
+      ? "border-amber-200/60"
       : worstStatus === "near"
         ? "border-amber-200/60"
         : "border-ink-200/60";
@@ -595,22 +623,59 @@ function ExpenseRiskCard({
       <CardHeader>
         <div className="flex items-center gap-2">
           <ShieldAlert className={`h-4 w-4 ${headerColor}`} />
-          <CardTitle className={headerColor}>Expense risk</CardTitle>
+          <CardTitle className={headerColor}>Settlement risk</CardTitle>
         </div>
         <CardDescription>
-          {worstStatus === "over"
-            ? "One or more expense caps are exceeded."
-            : worstStatus === "near"
-              ? "Approaching cap — worth flagging before show night."
-              : worstStatus === "no_cap"
-                ? "No caps set — all spend is unconstrained."
-                : "Expenses within cap limits."}
+          Potential issues to resolve before show night.
         </CardDescription>
       </CardHeader>
-      <CardContent className="divide-y divide-ink-100/60">
-        {checks.map((c) => (
-          <CapRow key={c.label} check={c} />
-        ))}
+      <CardContent className="space-y-6">
+        {/* Expense caps */}
+        <div>
+          <div className="eyebrow text-[10px] text-ink-400 mb-3">Expense caps</div>
+          <div className="divide-y divide-ink-100/60">
+            {checks.map((c) => (
+              <CapRow key={c.label} check={c} />
+            ))}
+          </div>
+        </div>
+
+        {/* Contract ambiguities */}
+        <div className="pt-2 border-t border-ink-100/80">
+          <div className="eyebrow text-[10px] text-ink-400 mb-3">Contract risk · AI-read from deal notes</div>
+          {hasContractRisk ? (
+            <ul className="space-y-2">
+              {ambiguityFlags.map((flag, i) => (
+                <li key={i} className="flex items-start gap-2">
+                  <AlertCircle className="h-3.5 w-3.5 text-amber-600 mt-0.5 shrink-0" />
+                  <span className="text-[12.5px] text-ink-700 leading-snug">{flag}</span>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <div className="text-[12.5px] text-ink-400">No obvious ambiguities found.</div>
+          )}
+        </div>
+
+        {/* Agent dispute history */}
+        <div className="pt-2 border-t border-ink-100/80">
+          <div className="eyebrow text-[10px] text-ink-400 mb-3">Agent dispute history · last 24 months</div>
+          {agentDisputeCount === 0 ? (
+            <div className="text-[12.5px] text-ink-400">
+              No disputed settlements with {agentName ?? "this agent"}.
+            </div>
+          ) : (
+            <div className="flex items-start gap-2">
+              <AlertCircle
+                className={`h-3.5 w-3.5 mt-0.5 shrink-0 ${agentDisputeCount >= 3 ? "text-rose-600" : "text-amber-600"}`}
+              />
+              <span className={`text-[12.5px] leading-snug ${agentDisputeCount >= 3 ? "text-rose-800" : "text-ink-700"}`}>
+                {agentName ?? "This agent"} has {agentDisputeCount} disputed settlement{agentDisputeCount === 1 ? "" : "s"} in the last 24 months.
+                {agentDisputeCount >= 3 && " Review deal terms carefully before show night."}
+              </span>
+            </div>
+          )}
+        </div>
       </CardContent>
     </Card>
   );

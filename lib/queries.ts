@@ -16,7 +16,7 @@ import {
   venues,
   type Recoup,
 } from "@/db/schema";
-import { desc, asc, eq, sql, lte } from "drizzle-orm";
+import { desc, asc, eq, sql, lte, gte, and } from "drizzle-orm";
 
 function todayDateString(): string {
   const d = new Date();
@@ -230,3 +230,25 @@ export async function getReports() {
 }
 
 export type Reports = Awaited<ReturnType<typeof getReports>>;
+
+/** Count disputed settlements for an agent in the last 24 months. */
+export async function getAgentDisputeCount(agentId: string): Promise<number> {
+  const cutoff = new Date();
+  cutoff.setMonth(cutoff.getMonth() - 24);
+  const cutoffStr = cutoff.toISOString().slice(0, 10);
+
+  const rows = await db
+    .select({ count: sql<number>`count(*)`.as("count") })
+    .from(settlements)
+    .innerJoin(shows, eq(settlements.showId, shows.id))
+    .innerJoin(artists, eq(shows.artistId, artists.id))
+    .where(
+      and(
+        eq(artists.agentId, agentId),
+        eq(settlements.status, "disputed"),
+        gte(shows.date, cutoffStr),
+      ),
+    );
+
+  return Number(rows[0]?.count ?? 0);
+}
