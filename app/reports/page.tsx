@@ -119,9 +119,9 @@ export default async function ReportsPage() {
                 {unsupportedPct}%
               </div>
               <p className="text-[12.5px] text-ink-600 mt-4 leading-relaxed max-w-sm">
-                At The Crescent, {unsupportedPct}% of deals — Vs deals, % of net, and
+                At The Crescent, {unsupportedPct}% of deals — % of net and
                 door deals — are deal types the in-app tool can&apos;t settle.
-                Across all customers, only about 18% actively use the tool at all.
+                Vs deals now calculate in-tool. Across all customers, only about 18% actively use the tool at all.
               </p>
             </div>
           </div>
@@ -333,7 +333,7 @@ export default async function ReportsPage() {
             <div className="space-y-[6px]">
               {dealMix.map(({ type, count, pct }) => {
                 const supported =
-                  type === "flat" || type === "percentage_of_gross";
+                  type === "flat" || type === "percentage_of_gross" || type === "vs";
                 const maxCount = Math.max(...dealMix.map((d) => d.count));
                 const barWidth = maxCount > 0 ? (count / maxCount) * 100 : 0;
                 const friendly: Record<string, string> = {
