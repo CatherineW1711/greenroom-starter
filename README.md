@@ -48,7 +48,15 @@ npm install
 
 This pulls down all the JavaScript packages the project needs. Takes about 60 seconds. You may see a few warnings — those are normal and safe to ignore.
 
-### 4. Start the app
+### 4. Add your API key
+
+Copy `.env.example` to `.env` and add your Anthropic API key from [console.anthropic.com](https://console.anthropic.com/) — it's required for the AI deal-parsing feature.
+
+```bash
+cp .env.example .env
+```
+
+### 5. Start the app
 
 ```bash
 npm run dev
@@ -63,7 +71,7 @@ You'll see something like:
 ✓ Ready in 1.2s
 ```
 
-### 5. Open it in your browser
+### 6. Open it in your browser
 
 Go to **[http://localhost:3000](http://localhost:3000)**.
 
